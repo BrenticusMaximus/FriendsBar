@@ -36,10 +36,3 @@ Releases page:
 - `https://github.com/BrenticusMaximus/FriendsBar/releases`
 
 <a href='https://ko-fi.com/U6U516PSAI' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi5.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
-
-## Local Install Package
-
-Build output is bundled under:
-
-- `release/FriendsBar/`
-- zip packages like `FriendsBar-build-YYYY-MM-DD-HHMMSS-TZ.zip`
