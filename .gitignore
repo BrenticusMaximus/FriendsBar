@@ -1,0 +1,9 @@
+node_modules/
+dist/
+release/
+.rollup.cache/
+__pycache__/
+*.log
+*.zip
+.DS_Store
+.vscode/settings.json

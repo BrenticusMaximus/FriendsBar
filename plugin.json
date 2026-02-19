@@ -1,0 +1,15 @@
+{
+  "name": "FriendsBar",
+  "author": "",
+  "flags": [],
+  "api_version": 2,
+  "publish": {
+    "tags": [
+      "friends",
+      "presence",
+      "top-bar"
+    ],
+    "description": "Shows online Steam friends next to the top bar search icon.",
+    "image": ""
+  }
+}
