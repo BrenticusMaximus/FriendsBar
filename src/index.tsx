@@ -41,8 +41,10 @@ const HIDE_IN_STORE_STORAGE = "friendsbar-hide-in-store";
 const HIDE_ON_GAME_PAGE_STORAGE = "friendsbar-hide-on-game-page";
 const TAP_ACTION_STORAGE = "friendsbar-tap-action";
 const COUNT_ONLY_MODE_STORAGE = "friendsbar-count-only-mode";
-const MIN_OFFSET_PX = -200;
-const MAX_OFFSET_PX = 200;
+const X_OFFSET_MIN_PX = -350;
+const X_OFFSET_MAX_PX = 350;
+const Y_OFFSET_MIN_PX = -25;
+const Y_OFFSET_MAX_PX = 500;
 const SP_TAB_CANDIDATES = [
   "SP",
   "sp",
@@ -327,20 +329,42 @@ class FriendsBarRuntime {
   }
 
   public getXOffset(): number {
-    return this.readStoredOffset(X_OFFSET_STORAGE);
+    return this.readStoredOffset(
+      X_OFFSET_STORAGE,
+      X_OFFSET_MIN_PX,
+      X_OFFSET_MAX_PX,
+      0
+    );
   }
 
   public getYOffset(): number {
-    return this.readStoredOffset(Y_OFFSET_STORAGE);
+    return this.readStoredOffset(
+      Y_OFFSET_STORAGE,
+      Y_OFFSET_MIN_PX,
+      Y_OFFSET_MAX_PX,
+      0
+    );
   }
 
   public setXOffset(value: number) {
-    this.writeStoredOffset(X_OFFSET_STORAGE, value);
+    this.writeStoredOffset(
+      X_OFFSET_STORAGE,
+      value,
+      X_OFFSET_MIN_PX,
+      X_OFFSET_MAX_PX,
+      0
+    );
     this.applyPositionOffsets();
   }
 
   public setYOffset(value: number) {
-    this.writeStoredOffset(Y_OFFSET_STORAGE, value);
+    this.writeStoredOffset(
+      Y_OFFSET_STORAGE,
+      value,
+      Y_OFFSET_MIN_PX,
+      Y_OFFSET_MAX_PX,
+      0
+    );
     this.applyPositionOffsets();
   }
 
@@ -396,30 +420,42 @@ class FriendsBarRuntime {
     return null;
   }
 
-  private clampOffset(value: number): number {
+  private clampOffset(value: number, min: number, max: number): number {
     if (!Number.isFinite(value)) {
-      return 0;
+      return min;
     }
-    return Math.max(MIN_OFFSET_PX, Math.min(MAX_OFFSET_PX, Math.round(value)));
+    return Math.max(min, Math.min(max, Math.round(value)));
   }
 
-  private readStoredOffset(storageKey: string): number {
+  private readStoredOffset(
+    storageKey: string,
+    min: number,
+    max: number,
+    defaultValue: number
+  ): number {
     try {
       const raw = window.localStorage.getItem(storageKey);
       if (raw === null) {
-        return 0;
+        return this.clampOffset(defaultValue, min, max);
       }
       const parsed = Number(raw);
-      return this.clampOffset(parsed);
+      return this.clampOffset(parsed, min, max);
     } catch {
-      return 0;
+      return this.clampOffset(defaultValue, min, max);
     }
   }
 
-  private writeStoredOffset(storageKey: string, value: number) {
-    const clamped = this.clampOffset(value);
+  private writeStoredOffset(
+    storageKey: string,
+    value: number,
+    min: number,
+    max: number,
+    defaultValue: number
+  ) {
+    const clamped = this.clampOffset(value, min, max);
+    const normalizedDefault = this.clampOffset(defaultValue, min, max);
     try {
-      if (clamped === 0) {
+      if (clamped === normalizedDefault) {
         window.localStorage.removeItem(storageKey);
       } else {
         window.localStorage.setItem(storageKey, `${clamped}`);
@@ -760,6 +796,7 @@ class FriendsBarRuntime {
       this.root.classList.add("friendsbar-anchored");
       this.root.classList.remove("friendsbar-fallback");
       this.syncIconSizeToTopBar();
+      this.applyPositionOffsets();
       this.applyVisibilityForCurrentContext();
       this.setState({ mounted: true, mountMode: "anchored" });
       return;
@@ -775,6 +812,7 @@ class FriendsBarRuntime {
       this.root.classList.add("friendsbar-anchored");
       this.root.classList.remove("friendsbar-fallback");
       this.syncIconSizeToTopBar();
+      this.applyPositionOffsets();
       this.applyVisibilityForCurrentContext();
       this.setState({ mounted: true, mountMode: "anchored" });
       return;
@@ -792,6 +830,7 @@ class FriendsBarRuntime {
     this.root.classList.add("friendsbar-fallback");
     this.root.classList.remove("friendsbar-anchored");
     this.syncIconSizeToTopBar();
+    this.applyPositionOffsets();
     this.applyVisibilityForCurrentContext();
     this.setState({ mounted: true, mountMode: "fallback" });
   }
@@ -899,8 +938,44 @@ class FriendsBarRuntime {
     if (!this.root) {
       return;
     }
-    this.root.style.setProperty("--friendsbar-offset-x", `${this.getXOffset()}px`);
-    this.root.style.setProperty("--friendsbar-offset-y", `${this.getYOffset()}px`);
+    const requestedX = this.getXOffset();
+    const requestedY = this.getYOffset();
+
+    // When anchored in the top bar, use configured offsets directly.
+    // In fallback mode, additionally clamp to viewport bounds.
+    if (this.root.classList.contains("friendsbar-anchored")) {
+      this.root.style.setProperty("--friendsbar-offset-x", `${requestedX}px`);
+      this.root.style.setProperty("--friendsbar-offset-y", `${requestedY}px`);
+      return;
+    }
+
+    // Measure a baseline rect with neutral offsets, then clamp so the final position
+    // remains in-bounds for the current viewport.
+    this.root.style.setProperty("--friendsbar-offset-x", "0px");
+    this.root.style.setProperty("--friendsbar-offset-y", "0px");
+
+    const rect = this.root.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) {
+      this.root.style.setProperty("--friendsbar-offset-x", `${requestedX}px`);
+      this.root.style.setProperty("--friendsbar-offset-y", `${requestedY}px`);
+      return;
+    }
+
+    const doc = this.getTargetDocument();
+    const viewportWidth = doc.defaultView?.innerWidth ?? window.innerWidth;
+    const viewportHeight = doc.defaultView?.innerHeight ?? window.innerHeight;
+    const edgePadding = 2;
+
+    const minX = edgePadding - rect.left;
+    const maxX = viewportWidth - edgePadding - rect.right;
+    const minY = edgePadding - rect.top;
+    const maxY = viewportHeight - edgePadding - rect.bottom;
+
+    const clampedX = Math.max(minX, Math.min(maxX, requestedX));
+    const clampedY = Math.max(minY, Math.min(maxY, requestedY));
+
+    this.root.style.setProperty("--friendsbar-offset-x", `${Math.round(clampedX)}px`);
+    this.root.style.setProperty("--friendsbar-offset-y", `${Math.round(clampedY)}px`);
   }
 
   private findSearchAnchor(): HTMLElement | null {
@@ -1498,6 +1573,7 @@ class FriendsBarRuntime {
     }
 
     this.renderWithAnimation(nodes);
+    this.applyPositionOffsets();
     this.applyVisibilityForCurrentContext();
   }
 
@@ -5021,8 +5097,8 @@ const FriendsBarPanel = () => {
       <PanelSectionRow>
         <SliderField
           label="X offset"
-          min={MIN_OFFSET_PX}
-          max={MAX_OFFSET_PX}
+          min={X_OFFSET_MIN_PX}
+          max={X_OFFSET_MAX_PX}
           step={1}
           value={xOffset}
           valueSuffix="px"
@@ -5034,10 +5110,24 @@ const FriendsBarPanel = () => {
         />
       </PanelSectionRow>
       <PanelSectionRow>
+        <div style={{ display: "flex", gap: "8px", width: "100%" }}>
+          <button
+            type="button"
+            onClick={() => {
+              const reset = 0;
+              setXOffset(reset);
+              runtime.setXOffset(reset);
+            }}
+          >
+            Reset X offset
+          </button>
+        </div>
+      </PanelSectionRow>
+      <PanelSectionRow>
         <SliderField
           label="Y offset"
-          min={MIN_OFFSET_PX}
-          max={MAX_OFFSET_PX}
+          min={Y_OFFSET_MIN_PX}
+          max={Y_OFFSET_MAX_PX}
           step={1}
           value={yOffset}
           valueSuffix="px"
@@ -5047,6 +5137,20 @@ const FriendsBarPanel = () => {
             runtime.setYOffset(value);
           }}
         />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <div style={{ display: "flex", gap: "8px", width: "100%" }}>
+          <button
+            type="button"
+            onClick={() => {
+              const reset = 0;
+              setYOffset(reset);
+              runtime.setYOffset(reset);
+            }}
+          >
+            Reset Y offset
+          </button>
+        </div>
       </PanelSectionRow>
       <PanelSectionRow>
         <div style={{ display: "flex", gap: "8px", width: "100%" }}>
