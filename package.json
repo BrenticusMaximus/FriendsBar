@@ -1,6 +1,6 @@
 {
   "name": "friendsbar",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Show online Steam friends in the Steam Deck top bar.",
   "type": "module",
   "scripts": {

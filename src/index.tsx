@@ -3,7 +3,6 @@ import {
   executeInTab,
   fetchNoCors,
   routerHook,
-  useQuickAccessVisible,
 } from "@decky/api";
 import {
   modules as webpackModuleMap,
@@ -14,7 +13,9 @@ import {
   PanelSectionRow,
   Router,
   ModalRoot,
+  SliderField,
   TextField,
+  ToggleField,
   showModal,
   searchBarClasses,
   staticClasses,
@@ -26,12 +27,22 @@ const STYLE_ID = "friendsbar-style";
 const GLOBAL_COMPONENT_NAME = "friendsbar-global-mount";
 const REFRESH_MS = 60_000;
 const REMOUNT_MS = 2_000;
+const STORE_PROBE_CACHE_MS = 5_000;
 const MAX_VISIBLE_FRIENDS = 8;
 const STEAM_ID64_BASE = BigInt("76561197960265728");
 const SP_TAB_TIMEOUT_MS = 7_000;
 const WEBPACK_SCAN_CACHE_MS = 5 * 60_000;
 const DOM_CACHE_MS = 120_000;
 const STEAM_WEB_API_KEY_STORAGE = "friendsbar-steam-web-api-key";
+const X_OFFSET_STORAGE = "friendsbar-x-offset";
+const Y_OFFSET_STORAGE = "friendsbar-y-offset";
+const ENABLED_STORAGE = "friendsbar-enabled";
+const HIDE_IN_STORE_STORAGE = "friendsbar-hide-in-store";
+const HIDE_ON_GAME_PAGE_STORAGE = "friendsbar-hide-on-game-page";
+const TAP_ACTION_STORAGE = "friendsbar-tap-action";
+const COUNT_ONLY_MODE_STORAGE = "friendsbar-count-only-mode";
+const MIN_OFFSET_PX = -200;
+const MAX_OFFSET_PX = 200;
 const SP_TAB_CANDIDATES = [
   "SP",
   "sp",
@@ -56,6 +67,9 @@ type RuntimeState = {
   documentSource: string;
   sourceDebug: string;
   spProbe: string;
+  routeDebug: string;
+  storeDebug: string;
+  hiddenBySettings: boolean;
   error: string | null;
 };
 
@@ -91,6 +105,8 @@ type FriendLoadResult = {
   debug: string;
 };
 
+type TapAction = "chat" | "toggle-count";
+
 const DEFAULT_AVATAR = `data:image/svg+xml;utf8,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="100%" height="100%" fill="#2f4052"/><circle cx="32" cy="24" r="11" fill="#8aa0b3"/><rect x="14" y="40" width="36" height="16" rx="8" fill="#8aa0b3"/></svg>'
 )}`;
@@ -110,6 +126,7 @@ const splitClassMap = (classMap?: string): string | null => {
 class FriendsBarRuntime {
   private running = false;
   private refreshing = false;
+  private forceRefreshQueued = false;
   private mountTimer: number | null = null;
   private refreshTimer: number | null = null;
   private observer: MutationObserver | null = null;
@@ -123,6 +140,10 @@ class FriendsBarRuntime {
   private domCachedFriends: FriendPresence[] = [];
   private domCachedAt = 0;
   private quickAccessVisible = false;
+  private storeContextActive = false;
+  private storeContextCheckedAt = 0;
+  private lastRouteDebug = "";
+  private lastStoreDebug = "";
   private state: RuntimeState = {
     displayedCount: 0,
     onlineCount: 0,
@@ -136,6 +157,9 @@ class FriendsBarRuntime {
     documentSource: "unknown",
     sourceDebug: "",
     spProbe: "",
+    routeDebug: "",
+    storeDebug: "",
+    hiddenBySettings: false,
     error: null,
   };
 
@@ -155,6 +179,7 @@ class FriendsBarRuntime {
     }, REFRESH_MS);
     this.mountTimer = window.setInterval(() => {
       this.ensureMounted();
+      void this.refreshRouteVisibility();
     }, REMOUNT_MS);
   }
 
@@ -183,6 +208,8 @@ class FriendsBarRuntime {
     this.lastSPProbe = "";
     this.domCachedFriends = [];
     this.domCachedAt = 0;
+    this.storeContextActive = false;
+    this.storeContextCheckedAt = 0;
     this.setState({
       mounted: false,
       mountMode: "none",
@@ -195,6 +222,9 @@ class FriendsBarRuntime {
       documentSource: "unknown",
       sourceDebug: "",
       spProbe: "",
+      routeDebug: "",
+      storeDebug: "",
+      hiddenBySettings: false,
       error: null,
     });
   }
@@ -238,6 +268,82 @@ class FriendsBarRuntime {
     void this.refresh();
   }
 
+  public getEnabled(): boolean {
+    return this.readStoredBoolean(ENABLED_STORAGE, true);
+  }
+
+  public setEnabled(value: boolean) {
+    this.writeStoredBoolean(ENABLED_STORAGE, value, true);
+    void this.refresh();
+  }
+
+  public getHideInStore(): boolean {
+    return this.readStoredBoolean(HIDE_IN_STORE_STORAGE, false);
+  }
+
+  public setHideInStore(value: boolean) {
+    this.writeStoredBoolean(HIDE_IN_STORE_STORAGE, value, false);
+    void this.refresh();
+  }
+
+  public getHideOnGamePage(): boolean {
+    return this.readStoredBoolean(HIDE_ON_GAME_PAGE_STORAGE, false);
+  }
+
+  public setHideOnGamePage(value: boolean) {
+    this.writeStoredBoolean(HIDE_ON_GAME_PAGE_STORAGE, value, false);
+    void this.refresh();
+  }
+
+  public getTapAction(): TapAction {
+    try {
+      const value = window.localStorage.getItem(TAP_ACTION_STORAGE);
+      return value === "toggle-count" ? "toggle-count" : "chat";
+    } catch {
+      return "chat";
+    }
+  }
+
+  public setTapAction(value: TapAction) {
+    try {
+      if (value === "chat") {
+        window.localStorage.removeItem(TAP_ACTION_STORAGE);
+        this.setCountOnlyMode(false);
+      } else {
+        window.localStorage.setItem(TAP_ACTION_STORAGE, value);
+      }
+    } catch {
+      // ignore storage failures
+    }
+    void this.refresh();
+  }
+
+  public getCountOnlyMode(): boolean {
+    return this.readStoredBoolean(COUNT_ONLY_MODE_STORAGE, false);
+  }
+
+  public setCountOnlyMode(value: boolean) {
+    this.writeStoredBoolean(COUNT_ONLY_MODE_STORAGE, value, false);
+  }
+
+  public getXOffset(): number {
+    return this.readStoredOffset(X_OFFSET_STORAGE);
+  }
+
+  public getYOffset(): number {
+    return this.readStoredOffset(Y_OFFSET_STORAGE);
+  }
+
+  public setXOffset(value: number) {
+    this.writeStoredOffset(X_OFFSET_STORAGE, value);
+    this.applyPositionOffsets();
+  }
+
+  public setYOffset(value: number) {
+    this.writeStoredOffset(Y_OFFSET_STORAGE, value);
+    this.applyPositionOffsets();
+  }
+
   public setPreferredDocument(doc: Document | null) {
     this.preferredDocument = doc;
     if (doc) {
@@ -252,11 +358,17 @@ class FriendsBarRuntime {
 
   public setQuickAccessVisible(visible: boolean) {
     this.quickAccessVisible = visible;
-    if (!this.root) {
-      return;
-    }
-    if (visible) {
-      this.root.style.display = "none";
+    void this.refresh();
+  }
+
+  public forceRefresh() {
+    this.storeContextCheckedAt = 0;
+    this.domCachedAt = 0;
+    this.domCachedFriends = [];
+    this.webpackContainersLastScan = 0;
+    this.webpackFriendContainers = [];
+    if (this.refreshing) {
+      this.forceRefreshQueued = true;
       return;
     }
     void this.refresh();
@@ -282,6 +394,67 @@ class FriendsBarRuntime {
       // ignore storage access failures
     }
     return null;
+  }
+
+  private clampOffset(value: number): number {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+    return Math.max(MIN_OFFSET_PX, Math.min(MAX_OFFSET_PX, Math.round(value)));
+  }
+
+  private readStoredOffset(storageKey: string): number {
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (raw === null) {
+        return 0;
+      }
+      const parsed = Number(raw);
+      return this.clampOffset(parsed);
+    } catch {
+      return 0;
+    }
+  }
+
+  private writeStoredOffset(storageKey: string, value: number) {
+    const clamped = this.clampOffset(value);
+    try {
+      if (clamped === 0) {
+        window.localStorage.removeItem(storageKey);
+      } else {
+        window.localStorage.setItem(storageKey, `${clamped}`);
+      }
+    } catch {
+      // ignore storage failures
+    }
+  }
+
+  private readStoredBoolean(storageKey: string, defaultValue: boolean): boolean {
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (raw === null) {
+        return defaultValue;
+      }
+      return raw === "1";
+    } catch {
+      return defaultValue;
+    }
+  }
+
+  private writeStoredBoolean(
+    storageKey: string,
+    value: boolean,
+    defaultValue: boolean
+  ) {
+    try {
+      if (value === defaultValue) {
+        window.localStorage.removeItem(storageKey);
+      } else {
+        window.localStorage.setItem(storageKey, value ? "1" : "0");
+      }
+    } catch {
+      // ignore storage failures
+    }
   }
 
   private getTargetDocument(): Document {
@@ -416,6 +589,8 @@ class FriendsBarRuntime {
         --friendsbar-overflow-size: 30px;
         --friendsbar-activity-width: 3px;
         --friendsbar-left-nudge: 28px;
+        --friendsbar-offset-x: 0px;
+        --friendsbar-offset-y: 0px;
         display: none;
         align-items: center;
         gap: 6px;
@@ -426,8 +601,8 @@ class FriendsBarRuntime {
 
       #${ROOT_ID}.friendsbar-anchored {
         position: relative;
-        margin-right: 12px;
-        transform: translateX(calc(-1 * var(--friendsbar-left-nudge)));
+        margin-right: 0;
+        transform: translate(var(--friendsbar-offset-x), var(--friendsbar-offset-y));
       }
 
       #${ROOT_ID}.friendsbar-fallback {
@@ -435,7 +610,10 @@ class FriendsBarRuntime {
         top: calc(env(safe-area-inset-top, 0px) + 6px);
         right: clamp(320px, 24vw, 560px);
         margin-right: 0;
-        transform: translateX(calc(-1 * var(--friendsbar-left-nudge)));
+        transform: translate(
+          calc((-1 * var(--friendsbar-left-nudge)) + var(--friendsbar-offset-x)),
+          var(--friendsbar-offset-y)
+        );
         background: transparent;
         border: 0;
         border-radius: 0;
@@ -456,6 +634,9 @@ class FriendsBarRuntime {
         padding: 0;
         background: transparent;
         overflow: hidden;
+        opacity: 1;
+        transform: translate(0, 0);
+        transition: opacity 220ms ease, transform 220ms ease;
       }
 
       #${ROOT_ID} .friendsbar-friend img {
@@ -468,12 +649,13 @@ class FriendsBarRuntime {
 
       #${ROOT_ID} .friendsbar-activity {
         position: absolute;
-        right: -1px;
+        right: 0;
         left: auto;
-        top: 1px;
-        bottom: 1px;
+        top: 0;
+        bottom: 0;
         width: var(--friendsbar-activity-width);
-        border-radius: 2px;
+        border-radius: 1px;
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.38);
         z-index: 2;
       }
 
@@ -488,23 +670,23 @@ class FriendsBarRuntime {
       #${ROOT_ID} .friendsbar-activity.green-dotted {
         background-image: repeating-linear-gradient(
           to bottom,
-          #4bc95f 0 3px,
-          transparent 3px 6px
+          #4bc95f 0 4px,
+          transparent 4px 8px
         );
       }
 
       #${ROOT_ID} .friendsbar-activity.blue-dotted {
         background-image: repeating-linear-gradient(
           to bottom,
-          #49a2ff 0 3px,
-          transparent 3px 6px
+          #49a2ff 0 4px,
+          transparent 4px 8px
         );
       }
 
       #${ROOT_ID} .friendsbar-overflow {
         width: var(--friendsbar-overflow-size);
         height: var(--friendsbar-overflow-size);
-        border-radius: 50%;
+        border-radius: 0;
         border: 1px solid rgba(255, 255, 255, 0.25);
         display: inline-flex;
         align-items: center;
@@ -514,6 +696,22 @@ class FriendsBarRuntime {
         font-size: 11px;
         font-weight: 700;
         line-height: 1;
+        opacity: 1;
+        transform: translate(0, 0);
+        transition: opacity 220ms ease, transform 220ms ease;
+      }
+
+      #${ROOT_ID} .friendsbar-enter-start {
+        opacity: 0;
+        transform: translateX(8px);
+      }
+
+      #${ROOT_ID} .friendsbar-leave-ghost {
+        position: absolute !important;
+        margin: 0 !important;
+        pointer-events: none !important;
+        opacity: 0;
+        transform: translateX(-8px);
       }
     `;
     doc.head.appendChild(style);
@@ -526,6 +724,7 @@ class FriendsBarRuntime {
     const doc = this.getTargetDocument();
     this.root = doc.createElement("div");
     this.root.id = ROOT_ID;
+    this.applyPositionOffsets();
   }
 
   private startObservers() {
@@ -561,11 +760,12 @@ class FriendsBarRuntime {
       this.root.classList.add("friendsbar-anchored");
       this.root.classList.remove("friendsbar-fallback");
       this.syncIconSizeToTopBar();
+      this.applyVisibilityForCurrentContext();
       this.setState({ mounted: true, mountMode: "anchored" });
       return;
     }
 
-    const anchor = this.findSearchAnchor();
+    const anchor = this.findSearchAnchor() ?? this.collectTopRightIconButtons()[0];
     if (anchor && anchor.parentElement) {
       if (this.root.parentElement !== anchor.parentElement) {
         anchor.parentElement.insertBefore(this.root, anchor);
@@ -575,6 +775,7 @@ class FriendsBarRuntime {
       this.root.classList.add("friendsbar-anchored");
       this.root.classList.remove("friendsbar-fallback");
       this.syncIconSizeToTopBar();
+      this.applyVisibilityForCurrentContext();
       this.setState({ mounted: true, mountMode: "anchored" });
       return;
     }
@@ -591,6 +792,7 @@ class FriendsBarRuntime {
     this.root.classList.add("friendsbar-fallback");
     this.root.classList.remove("friendsbar-anchored");
     this.syncIconSizeToTopBar();
+    this.applyVisibilityForCurrentContext();
     this.setState({ mounted: true, mountMode: "fallback" });
   }
 
@@ -642,6 +844,7 @@ class FriendsBarRuntime {
     return candidates[0] ?? null;
   }
 
+
   private syncIconSizeToTopBar() {
     if (!this.root) {
       return;
@@ -685,11 +888,19 @@ class FriendsBarRuntime {
 
     const iconSize = Math.max(28, Math.min(48, measured || 32));
     const overflowSize = Math.max(24, iconSize - 2);
-    const activityWidth = Math.max(3, Math.min(7, Math.round(iconSize * 0.12)));
+    const activityWidth = Math.max(5, Math.min(10, Math.round(iconSize * 0.2)));
 
     this.root.style.setProperty("--friendsbar-icon-size", `${iconSize}px`);
     this.root.style.setProperty("--friendsbar-overflow-size", `${overflowSize}px`);
     this.root.style.setProperty("--friendsbar-activity-width", `${activityWidth}px`);
+  }
+
+  private applyPositionOffsets() {
+    if (!this.root) {
+      return;
+    }
+    this.root.style.setProperty("--friendsbar-offset-x", `${this.getXOffset()}px`);
+    this.root.style.setProperty("--friendsbar-offset-y", `${this.getYOffset()}px`);
   }
 
   private findSearchAnchor(): HTMLElement | null {
@@ -804,6 +1015,7 @@ class FriendsBarRuntime {
     ).filter((node): node is HTMLElement => node instanceof HTMLElement);
 
     return buttons
+      .filter((button) => !this.root?.contains(button))
       .filter((button) => {
         const rect = button.getBoundingClientRect();
         if (rect.width < 14 || rect.width > 120 || rect.height < 14 || rect.height > 120) {
@@ -856,6 +1068,7 @@ class FriendsBarRuntime {
     }
     this.refreshing = true;
     try {
+      await this.refreshRouteVisibility();
       this.ensureMounted();
       const { friends, source, debug } = await this.loadOnlineFriends();
       this.renderFriends(friends);
@@ -892,7 +1105,335 @@ class FriendsBarRuntime {
       }
     } finally {
       this.refreshing = false;
+      if (this.forceRefreshQueued && this.running) {
+        this.forceRefreshQueued = false;
+        void this.refresh();
+      }
     }
+  }
+
+  private async refreshRouteVisibility() {
+    const routes = this.getRouteCandidates();
+    const storeFromRoutes = routes.some((route) => this.isStoreRoute(route));
+    const storeFromWindowState = this.detectStoreFromWindowState();
+    const storeFromTabProbe = await this.detectStoreFromTabs();
+    this.storeContextActive =
+      storeFromRoutes || storeFromWindowState || storeFromTabProbe;
+    this.storeContextCheckedAt = Date.now();
+    this.lastRouteDebug = routes.slice(0, 6).join(" || ").slice(0, 400);
+    this.lastStoreDebug = `route:${storeFromRoutes} window:${storeFromWindowState} tab:${storeFromTabProbe}`;
+    this.setState({
+      routeDebug: this.lastRouteDebug || "(none)",
+      storeDebug: this.lastStoreDebug,
+      hiddenBySettings: this.shouldHideBySettings(),
+    });
+    this.applyVisibilityForCurrentContext();
+  }
+
+  private getRouteCandidates(): string[] {
+    const candidates = new Set<string>();
+    const pushLocation = (loc?: Location | null) => {
+      if (!loc) {
+        return;
+      }
+      const composed = `${loc.pathname || ""}${loc.hash || ""}${loc.search || ""}`
+        .trim()
+        .toLowerCase();
+      if (composed) {
+        candidates.add(composed);
+      }
+      const href = String(loc.href || "").trim().toLowerCase();
+      if (href) {
+        candidates.add(href);
+      }
+    };
+
+    pushLocation(this.getTargetDocument().defaultView?.location ?? null);
+    pushLocation(window.location);
+    try {
+      pushLocation(window.top?.location ?? null);
+    } catch {
+      // ignore cross-origin access
+    }
+    for (const candidateWindow of this.getCandidateWindows()) {
+      try {
+        pushLocation((candidateWindow as any)?.location ?? null);
+      } catch {
+        // ignore cross-origin access
+      }
+    }
+
+    return Array.from(candidates);
+  }
+
+  private isStoreRoute(route: string): boolean {
+    const variants = new Set<string>([route]);
+    const tryDecode = (value: string) => {
+      try {
+        const decoded = decodeURIComponent(value);
+        if (decoded && decoded !== value) {
+          variants.add(decoded);
+        }
+      } catch {
+        // ignore decode issues
+      }
+    };
+    tryDecode(route);
+    for (const value of Array.from(variants)) {
+      tryDecode(value);
+    }
+
+    const hasStoreSignal = (value: string): boolean =>
+      value.includes("/store") ||
+      value.includes("#/store") ||
+      value.includes("tab=store") ||
+      value.includes("storehome") ||
+      value.includes("store.steampowered.com") ||
+      value.includes("store%2esteampowered%2ecom") ||
+      (value.includes("openurl") && value.includes("store"));
+
+    for (const value of variants) {
+      if (hasStoreSignal(value)) {
+        return true;
+      }
+    }
+
+    return (
+      Array.from(
+        this.getTargetDocument().querySelectorAll(
+          "a[href*='store.steampowered.com'], iframe[src*='store.steampowered.com']"
+        )
+      ).length > 0
+    );
+  }
+
+  private isGamePageRoute(route: string): boolean {
+    return (
+      route.includes("/library/app/") ||
+      route.includes("/library/details/") ||
+      route.includes("#/library/app/") ||
+      route.includes("#/library/details/") ||
+      route.includes("/app/") ||
+      route.includes("appid=") ||
+      route.includes("gamedetails") ||
+      route.includes("appdetails")
+    );
+  }
+
+  private shouldHideBySettings(): boolean {
+    if (!this.getEnabled()) {
+      return true;
+    }
+    const routes = this.getRouteCandidates();
+    if (!routes.length) {
+      return false;
+    }
+    if (
+      this.getHideInStore() &&
+      (this.storeContextActive || routes.some((route) => this.isStoreRoute(route)))
+    ) {
+      return true;
+    }
+    if (this.getHideOnGamePage() && routes.some((route) => this.isGamePageRoute(route))) {
+      return true;
+    }
+    return false;
+  }
+
+  private async isStoreContextActive(): Promise<boolean> {
+    const now = Date.now();
+    if (now - this.storeContextCheckedAt < STORE_PROBE_CACHE_MS) {
+      return this.storeContextActive;
+    }
+
+    const routes = this.getRouteCandidates();
+    if (routes.some((route) => this.isStoreRoute(route))) {
+      return true;
+    }
+    if (this.detectStoreFromWindowState()) {
+      return true;
+    }
+
+    const probeCode = `
+      (() => {
+        try {
+          const href = String(window.location?.href || "").toLowerCase();
+          const path = String(window.location?.pathname || "").toLowerCase();
+          const hash = String(window.location?.hash || "").toLowerCase();
+          const search = String(window.location?.search || "").toLowerCase();
+          const full = href + " " + path + " " + hash + " " + search;
+          if (full.includes("store.steampowered.com") || full.includes("/store") || full.includes("#/store")) {
+            return true;
+          }
+          const hasStoreFrame = !!document.querySelector("iframe[src*='store.steampowered.com'], webview[src*='store.steampowered.com']");
+          if (hasStoreFrame) {
+            return true;
+          }
+          const bodyText = String(document.body?.textContent || "").toLowerCase();
+          if (bodyText.includes("store.steampowered.com")) {
+            return true;
+          }
+          return false;
+        } catch {
+          return false;
+        }
+      })();
+    `;
+
+    const probes = await this.runStoreTabProbe(probeCode);
+    return probes.some(Boolean);
+  }
+
+  private async detectStoreFromTabs(): Promise<boolean> {
+    const probeCode = `
+      (() => {
+        try {
+          const href = String(window.location?.href || "").toLowerCase();
+          const path = String(window.location?.pathname || "").toLowerCase();
+          const hash = String(window.location?.hash || "").toLowerCase();
+          const search = String(window.location?.search || "").toLowerCase();
+          const full = href + " " + path + " " + hash + " " + search;
+          if (full.includes("store.steampowered.com") || full.includes("/store") || full.includes("#/store")) {
+            return true;
+          }
+          const hasStoreFrame = !!document.querySelector("iframe[src*='store.steampowered.com'], webview[src*='store.steampowered.com']");
+          if (hasStoreFrame) {
+            return true;
+          }
+          return false;
+        } catch {
+          return false;
+        }
+      })();
+    `;
+    const probes = await this.runStoreTabProbe(probeCode);
+    return probes.some(Boolean);
+  }
+
+  private async runStoreTabProbe(code: string): Promise<boolean[]> {
+    return Promise.all(
+      SP_TAB_CANDIDATES.map(async (tab) => {
+        try {
+          const result = await Promise.race([
+            executeInTab(tab, true, code),
+            new Promise<null>((resolve) => {
+              window.setTimeout(() => resolve(null), 1_000);
+            }),
+          ]);
+          const value =
+            result && typeof result === "object" && "result" in result
+              ? (result as any).result
+              : result;
+          return value === true || value === "true";
+        } catch {
+          return false;
+        }
+      })
+    );
+  }
+
+  private detectStoreFromWindowState(): boolean {
+    const looksLikeStore = (value: unknown): boolean => {
+      if (typeof value !== "string") {
+        return false;
+      }
+      const text = value.toLowerCase();
+      return (
+        text.includes("store.steampowered.com") ||
+        text.includes("#/store") ||
+        text.includes("/store") ||
+        text.includes("tab=store") ||
+        text.includes("storehome") ||
+        (text.includes("openurl") && text.includes("store"))
+      );
+    };
+
+    const focusedCandidates = [
+      (window as any).SteamUIStore?.GetFocusedWindowInstance?.(),
+      (Router as any)?.WindowStore?.GetFocusedWindowInstance?.(),
+      (Router as any)?.WindowStore?.m_FocusedWindowInstance,
+      (Router as any)?.WindowStore?.m_FocusedWindow,
+      (Router as any)?.WindowStore,
+      (window as any).SteamUIStore,
+    ];
+
+    for (const candidate of focusedCandidates) {
+      if (!candidate) {
+        continue;
+      }
+
+      const directValues = [
+        candidate?.strTitle,
+        candidate?.m_strTitle,
+        candidate?.title,
+        candidate?.name,
+        candidate?.WindowType,
+        candidate?.m_eWindowType,
+        candidate?.route,
+        candidate?.path,
+        candidate?.url,
+        candidate?.href,
+        candidate?.location?.href,
+        candidate?.BrowserWindow?.location?.href,
+        candidate?.BrowserWindow?.document?.URL,
+        candidate?.BrowserWindow?.document?.location?.href,
+      ];
+      if (directValues.some(looksLikeStore)) {
+        return true;
+      }
+
+      const queue: unknown[] = [candidate];
+      const seen = new WeakSet<object>();
+      let scanned = 0;
+      while (queue.length && scanned < 250) {
+        const next = queue.shift();
+        scanned += 1;
+        if (!next || typeof next !== "object") {
+          continue;
+        }
+        const objectValue = next as Record<string, unknown>;
+        if (seen.has(objectValue)) {
+          continue;
+        }
+        seen.add(objectValue);
+        const keys = Object.keys(objectValue).slice(0, 80);
+        for (const key of keys) {
+          const value = objectValue[key];
+          if (
+            typeof value === "string" &&
+            /url|href|path|route|uri|src|title|name|location/i.test(key) &&
+            looksLikeStore(value)
+          ) {
+            return true;
+          }
+          if (value && typeof value === "object") {
+            queue.push(value);
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private applyVisibilityForCurrentContext() {
+    if (!this.root) {
+      return;
+    }
+    if (!this.root.childElementCount) {
+      this.root.style.display = "none";
+      return;
+    }
+    this.root.style.display = this.shouldHideBySettings() ? "none" : "inline-flex";
+  }
+
+  private handleFriendTap(steamId: string) {
+    if (this.getTapAction() === "toggle-count") {
+      this.setCountOnlyMode(!this.getCountOnlyMode());
+      void this.refresh();
+      return;
+    }
+    this.openFriendChat(steamId);
   }
 
   private renderFriends(friends: FriendPresence[]) {
@@ -900,7 +1441,7 @@ class FriendsBarRuntime {
       return;
     }
 
-    if (this.quickAccessVisible) {
+    if (this.shouldHideBySettings()) {
       this.root.style.display = "none";
       return;
     }
@@ -911,22 +1452,53 @@ class FriendsBarRuntime {
       return;
     }
 
-    const visible = friends.slice(0, MAX_VISIBLE_FRIENDS);
-    const nodes: HTMLElement[] = visible.map((friend) =>
-      this.createFriendButton(friend)
-    );
-
-    if (friends.length > MAX_VISIBLE_FRIENDS) {
-      const doc = this.root.ownerDocument ?? this.getTargetDocument();
-      const extra = doc.createElement("div");
-      extra.className = "friendsbar-overflow";
-      extra.textContent = `+${friends.length - MAX_VISIBLE_FRIENDS}`;
-      extra.title = `${friends.length - MAX_VISIBLE_FRIENDS} more online`;
-      nodes.push(extra);
+    if (this.getCountOnlyMode()) {
+      const existing = this.collectRenderableChildrenByKey();
+      const countKey = "count-toggle";
+      const countNode =
+        (existing.get(countKey) as HTMLButtonElement | undefined) ??
+        this.createCountToggle(friends.length);
+      countNode.textContent = `${friends.length}`;
+      countNode.title = `${friends.length} online friends (tap to toggle icon/count view)`;
+      this.renderWithAnimation([countNode]);
+      this.root.style.display = "inline-flex";
+      return;
     }
 
-    this.root.replaceChildren(...nodes);
-    this.root.style.display = "inline-flex";
+    const visible = friends.slice(0, MAX_VISIBLE_FRIENDS);
+    const existing = this.collectRenderableChildrenByKey();
+    const nodes: HTMLElement[] = visible.map((friend) => {
+      const key = `friend:${friend.steamId}`;
+      const current = existing.get(key);
+      if (current instanceof HTMLButtonElement) {
+        this.updateFriendButton(current, friend);
+        return current;
+      }
+      return this.createFriendButton(friend);
+    });
+
+    if (friends.length > MAX_VISIBLE_FRIENDS) {
+      const overflowKey = "overflow";
+      const overflowText = `+${friends.length - MAX_VISIBLE_FRIENDS}`;
+      const overflowTitle = `${friends.length - MAX_VISIBLE_FRIENDS} more online`;
+      const current = existing.get(overflowKey);
+      if (current instanceof HTMLDivElement) {
+        current.textContent = overflowText;
+        current.title = overflowTitle;
+        nodes.push(current);
+      } else {
+        const doc = this.root.ownerDocument ?? this.getTargetDocument();
+        const extra = doc.createElement("div");
+        extra.className = "friendsbar-overflow";
+        extra.dataset.fbKey = overflowKey;
+        extra.textContent = overflowText;
+        extra.title = overflowTitle;
+        nodes.push(extra);
+      }
+    }
+
+    this.renderWithAnimation(nodes);
+    this.applyVisibilityForCurrentContext();
   }
 
   private createFriendButton(friend: FriendPresence): HTMLButtonElement {
@@ -934,9 +1506,10 @@ class FriendsBarRuntime {
     const button = doc.createElement("button");
     button.type = "button";
     button.className = "friendsbar-friend";
+    button.dataset.fbKey = `friend:${friend.steamId}`;
     button.title = this.buildTitle(friend);
     button.onclick = () => {
-      this.openFriendChat(friend.steamId);
+      this.handleFriendTap(friend.steamId);
     };
 
     const bar = doc.createElement("span");
@@ -955,6 +1528,162 @@ class FriendsBarRuntime {
     button.appendChild(bar);
     button.appendChild(avatar);
     return button;
+  }
+
+  private updateFriendButton(button: HTMLButtonElement, friend: FriendPresence) {
+    button.title = this.buildTitle(friend);
+    button.onclick = () => {
+      this.handleFriendTap(friend.steamId);
+    };
+    button.dataset.fbKey = `friend:${friend.steamId}`;
+
+    const bar = button.querySelector(".friendsbar-activity") as HTMLSpanElement | null;
+    if (bar) {
+      bar.className = `friendsbar-activity ${this.activityClass(friend)}`;
+    }
+
+    const avatar = button.querySelector("img") as HTMLImageElement | null;
+    if (avatar) {
+      avatar.src = friend.avatarUrl;
+      avatar.alt = friend.personaName;
+    }
+  }
+
+  private createCountToggle(totalOnline: number): HTMLButtonElement {
+    const doc = this.root?.ownerDocument ?? this.getTargetDocument();
+    const button = doc.createElement("button");
+    button.type = "button";
+    button.className = "friendsbar-overflow";
+    button.dataset.fbKey = "count-toggle";
+    button.title = `${totalOnline} online friends (tap to toggle icon/count view)`;
+    button.textContent = `${totalOnline}`;
+    button.onclick = () => {
+      this.setCountOnlyMode(!this.getCountOnlyMode());
+      void this.refresh();
+    };
+    return button;
+  }
+
+  private collectRenderableChildrenByKey(): Map<string, HTMLElement> {
+    const out = new Map<string, HTMLElement>();
+    if (!this.root) {
+      return out;
+    }
+    const children = Array.from(this.root.children).filter(
+      (node): node is HTMLElement => node instanceof HTMLElement
+    );
+    for (const child of children) {
+      if (child.classList.contains("friendsbar-leave-ghost")) {
+        continue;
+      }
+      const key = child.dataset.fbKey;
+      if (key) {
+        out.set(key, child);
+      }
+    }
+    return out;
+  }
+
+  private renderWithAnimation(nextNodes: HTMLElement[]) {
+    if (!this.root) {
+      return;
+    }
+
+    const currentNodes = Array.from(this.root.children).filter(
+      (node): node is HTMLElement =>
+        node instanceof HTMLElement && !node.classList.contains("friendsbar-leave-ghost")
+    );
+    const currentByKey = new Map<string, HTMLElement>();
+    const oldRects = new Map<string, DOMRect>();
+    for (const node of currentNodes) {
+      const key = node.dataset.fbKey;
+      if (!key) {
+        continue;
+      }
+      currentByKey.set(key, node);
+      oldRects.set(key, node.getBoundingClientRect());
+    }
+
+    const nextKeys = new Set<string>();
+    for (const node of nextNodes) {
+      const key = node.dataset.fbKey;
+      if (key) {
+        nextKeys.add(key);
+      }
+    }
+
+    const leavingNodes = currentNodes.filter((node) => {
+      const key = node.dataset.fbKey;
+      return key && !nextKeys.has(key);
+    });
+
+    this.root.replaceChildren(...nextNodes);
+
+    for (const leaving of leavingNodes) {
+      this.spawnLeavingGhost(leaving);
+    }
+
+    const newRects = new Map<string, DOMRect>();
+    for (const node of nextNodes) {
+      const key = node.dataset.fbKey;
+      if (!key) {
+        continue;
+      }
+      newRects.set(key, node.getBoundingClientRect());
+    }
+
+    for (const node of nextNodes) {
+      const key = node.dataset.fbKey;
+      if (!key) {
+        continue;
+      }
+      const oldRect = oldRects.get(key);
+      const newRect = newRects.get(key);
+      if (!newRect) {
+        continue;
+      }
+      if (!oldRect) {
+        node.classList.add("friendsbar-enter-start");
+        void node.getBoundingClientRect();
+        node.classList.remove("friendsbar-enter-start");
+        continue;
+      }
+      const dx = oldRect.left - newRect.left;
+      const dy = oldRect.top - newRect.top;
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
+        continue;
+      }
+      const previousTransition = node.style.transition;
+      node.style.transition = "none";
+      node.style.transform = `translate(${dx}px, ${dy}px)`;
+      void node.getBoundingClientRect();
+      node.style.transition = previousTransition;
+      node.style.transform = "";
+    }
+  }
+
+  private spawnLeavingGhost(node: HTMLElement) {
+    if (!this.root) {
+      return;
+    }
+    const rootRect = this.root.getBoundingClientRect();
+    const rect = node.getBoundingClientRect();
+    const ghost = node.cloneNode(true) as HTMLElement;
+    ghost.classList.add("friendsbar-leave-ghost");
+    ghost.style.left = `${rect.left - rootRect.left}px`;
+    ghost.style.top = `${rect.top - rootRect.top}px`;
+    ghost.style.width = `${rect.width}px`;
+    ghost.style.height = `${rect.height}px`;
+    ghost.style.opacity = "1";
+    ghost.style.transform = "translateX(0)";
+    this.root.appendChild(ghost);
+    requestAnimationFrame(() => {
+      ghost.style.opacity = "0";
+      ghost.style.transform = "translateX(-8px)";
+    });
+    window.setTimeout(() => {
+      ghost.remove();
+    }, 240);
   }
 
   private buildTitle(friend: FriendPresence): string {
@@ -4120,20 +4849,29 @@ const summarizeApiKey = (key: string): string => {
 
 const FriendsBarPanel = () => {
   const state = useFriendsBarState();
-  const quickAccessVisible = useQuickAccessVisible();
   const [savedApiKey, setSavedApiKey] = useState(runtime.getConfiguredWebApiKey());
-
-  useEffect(() => {
-    runtime.setQuickAccessVisible(quickAccessVisible);
-    return () => {
-      runtime.setQuickAccessVisible(false);
-    };
-  }, [quickAccessVisible]);
+  const [xOffset, setXOffset] = useState(runtime.getXOffset());
+  const [yOffset, setYOffset] = useState(runtime.getYOffset());
+  const [enabled, setEnabled] = useState(runtime.getEnabled());
+  const [hideInStore, setHideInStore] = useState(runtime.getHideInStore());
+  const [hideOnGamePage, setHideOnGamePage] = useState(runtime.getHideOnGamePage());
+  const [tapTogglesCountMode, setTapTogglesCountMode] = useState(
+    runtime.getTapAction() === "toggle-count"
+  );
 
   useEffect(() => {
     const current = runtime.getConfiguredWebApiKey();
     setSavedApiKey(current);
   }, [state.hasWebApiKey]);
+
+  useEffect(() => {
+    setXOffset(runtime.getXOffset());
+    setYOffset(runtime.getYOffset());
+    setEnabled(runtime.getEnabled());
+    setHideInStore(runtime.getHideInStore());
+    setHideOnGamePage(runtime.getHideOnGamePage());
+    setTapTogglesCountMode(runtime.getTapAction() === "toggle-count");
+  }, []);
 
   const openApiKeyEditor = () => {
     let modalHandle: { Close: () => void } | null = null;
@@ -4236,7 +4974,107 @@ const FriendsBarPanel = () => {
         </div>
       </PanelSectionRow>
       <PanelSectionRow>
+        <ToggleField
+          label="Show FriendsBar globally"
+          checked={enabled}
+          onChange={(value) => {
+            setEnabled(value);
+            runtime.setEnabled(value);
+          }}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ToggleField
+          label="Hide while in Steam Store"
+          checked={hideInStore}
+          onChange={(value) => {
+            setHideInStore(value);
+            runtime.setHideInStore(value);
+          }}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ToggleField
+          label="Hide while on game page"
+          checked={hideOnGamePage}
+          onChange={(value) => {
+            setHideOnGamePage(value);
+            runtime.setHideOnGamePage(value);
+          }}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ToggleField
+          label="Tap toggles between online friend icons or online friend count"
+          checked={tapTogglesCountMode}
+          description={
+            tapTogglesCountMode
+              ? "Tap toggles between online friend count and full friend icons."
+              : "Tap jumps to friend messaging."
+          }
+          onChange={(value) => {
+            setTapTogglesCountMode(value);
+            runtime.setTapAction(value ? "toggle-count" : "chat");
+          }}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <SliderField
+          label="X offset"
+          min={MIN_OFFSET_PX}
+          max={MAX_OFFSET_PX}
+          step={1}
+          value={xOffset}
+          valueSuffix="px"
+          showValue
+          onChange={(value) => {
+            setXOffset(value);
+            runtime.setXOffset(value);
+          }}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <SliderField
+          label="Y offset"
+          min={MIN_OFFSET_PX}
+          max={MAX_OFFSET_PX}
+          step={1}
+          value={yOffset}
+          valueSuffix="px"
+          showValue
+          onChange={(value) => {
+            setYOffset(value);
+            runtime.setYOffset(value);
+          }}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <div style={{ display: "flex", gap: "8px", width: "100%" }}>
+          <button
+            type="button"
+            onClick={() => {
+              runtime.forceRefresh();
+            }}
+          >
+            Force update now
+          </button>
+        </div>
+      </PanelSectionRow>
+      <PanelSectionRow>
         <div>Last refresh: {formatTimestamp(state.lastUpdated)}</div>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <div>Hidden by settings: {state.hiddenBySettings ? "Yes" : "No"}</div>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <div style={{ wordBreak: "break-all", overflowWrap: "anywhere" }}>
+          Store probe: {state.storeDebug || "(none)"}
+        </div>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <div style={{ wordBreak: "break-all", overflowWrap: "anywhere" }}>
+          Route candidates: {state.routeDebug || "(none)"}
+        </div>
       </PanelSectionRow>
       <PanelSectionRow>
         <div>

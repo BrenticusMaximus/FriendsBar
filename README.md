@@ -4,7 +4,7 @@
 
 FriendsBar is a Decky Loader plugin that shows your online Steam friends in the Steam Deck top bar, immediately to the left of the search icon.
 
-![FriendsBar screenshot](https://images.steamusercontent.com/ugc/12070752432616538509/613468E5DC135DF86192CDEBAE4C1605CDE4FC9C/?imw=5000&imh=5000&ima=fit&impolicy=Letterbox&imcolor=%23000000&letterbox=false)
+![FriendsBar screenshot](https://images.steamusercontent.com/ugc/10384956069292451659/921BA2D8E43BC6873932148728E338DA0FAC5EDA/?imw=5000&imh=5000&ima=fit&impolicy=Letterbox&imcolor=%23000000&letterbox=false)
 
 ## Features
 
