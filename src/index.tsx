@@ -29,6 +29,16 @@ const REFRESH_MS = 60_000;
 const REMOUNT_MS = 2_000;
 const STORE_PROBE_CACHE_MS = 5_000;
 const MAX_VISIBLE_FRIENDS = 10;
+const RUNNING_APP_EXCLUDED_IDS = new Set<number>([
+  7,
+  760,
+  12210,
+  12211,
+  12212,
+  12213,
+  12218,
+  228980,
+]);
 const STEAM_ID64_BASE = BigInt("76561197960265728");
 const SP_TAB_TIMEOUT_MS = 7_000;
 const WEBPACK_SCAN_CACHE_MS = 5 * 60_000;
@@ -144,6 +154,7 @@ class FriendsBarRuntime {
   private quickAccessVisible = false;
   private storeContextActive = false;
   private storeContextCheckedAt = 0;
+  private inGameSessionActive = false;
   private lastRouteDebug = "";
   private lastStoreDebug = "";
   private state: RuntimeState = {
@@ -212,6 +223,7 @@ class FriendsBarRuntime {
     this.domCachedAt = 0;
     this.storeContextActive = false;
     this.storeContextCheckedAt = 0;
+    this.inGameSessionActive = false;
     this.setState({
       mounted: false,
       mountMode: "none",
@@ -1192,11 +1204,13 @@ class FriendsBarRuntime {
     const storeFromRoutes = routes.some((route) => this.isStoreRoute(route));
     const storeFromWindowState = this.detectStoreFromWindowState();
     const storeFromTabProbe = await this.detectStoreFromTabs();
+    const inGameFromApps = await this.detectActiveGameplay();
     this.storeContextActive =
       storeFromRoutes || storeFromWindowState || storeFromTabProbe;
+    this.inGameSessionActive = inGameFromApps;
     this.storeContextCheckedAt = Date.now();
     this.lastRouteDebug = routes.slice(0, 6).join(" || ").slice(0, 400);
-    this.lastStoreDebug = `route:${storeFromRoutes} window:${storeFromWindowState} tab:${storeFromTabProbe}`;
+    this.lastStoreDebug = `route:${storeFromRoutes} window:${storeFromWindowState} tab:${storeFromTabProbe} game:${inGameFromApps}`;
     this.setState({
       routeDebug: this.lastRouteDebug || "(none)",
       storeDebug: this.lastStoreDebug,
@@ -1296,6 +1310,9 @@ class FriendsBarRuntime {
   }
 
   private shouldHideBySettings(): boolean {
+    if (this.inGameSessionActive) {
+      return true;
+    }
     if (!this.getEnabled()) {
       return true;
     }
@@ -1313,6 +1330,326 @@ class FriendsBarRuntime {
       return true;
     }
     return false;
+  }
+
+  private extractAppId(...candidates: any[]): number | null {
+    for (const candidate of candidates) {
+      if (typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0) {
+        return Math.trunc(candidate);
+      }
+      if (typeof candidate === "string") {
+        const parsed = Number.parseInt(candidate, 10);
+        if (!Number.isNaN(parsed) && parsed > 0) {
+          return parsed;
+        }
+      }
+      if (candidate && typeof candidate === "object") {
+        const possible =
+          candidate.appid ??
+          candidate.app_id ??
+          candidate.unAppID ??
+          candidate.nAppID ??
+          candidate.id;
+        if (possible !== undefined && possible !== null) {
+          const parsed = Number.parseInt(String(possible), 10);
+          if (!Number.isNaN(parsed) && parsed > 0) {
+            return parsed;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  private isEligibleRunningAppId(appId: number): boolean {
+    return Number.isFinite(appId) && appId > 0 && !RUNNING_APP_EXCLUDED_IDS.has(appId);
+  }
+
+  private getStateText(candidate: any): string {
+    return String(
+      candidate?.state ??
+        candidate?.app_state ??
+        candidate?.strAppState ??
+        candidate?.status ??
+        candidate?.m_eAppState ??
+        candidate?.eAppState ??
+        ""
+    )
+      .trim()
+      .toLowerCase();
+  }
+
+  private hasStartedMarker(candidate: any): boolean {
+    if (!candidate || typeof candidate !== "object") {
+      return false;
+    }
+    const startedFlags = [
+      candidate.playing,
+      candidate.in_game,
+      candidate.inGame,
+      candidate.bInGame,
+      candidate.BInGame,
+      candidate.is_ingame,
+      candidate.isInGame,
+    ];
+    if (
+      startedFlags.some(
+        (value) =>
+          value === true ||
+          value === 1 ||
+          value === "1" ||
+          String(value).toLowerCase() === "true"
+      )
+    ) {
+      return true;
+    }
+    const stateText = this.getStateText(candidate);
+    if (!stateText) {
+      return false;
+    }
+    return (
+      stateText.includes("in-game") ||
+      stateText.includes("in_game") ||
+      stateText.includes("ingame") ||
+      stateText.includes("playing") ||
+      stateText.includes("active") ||
+      stateText === "running"
+    );
+  }
+
+  private hasLaunchingMarker(candidate: any): boolean {
+    if (!candidate || typeof candidate !== "object") {
+      return false;
+    }
+    const launchFlags = [
+      candidate.running,
+      candidate.is_running,
+      candidate.isRunning,
+      candidate.bIsRunning,
+      candidate.BIsRunning,
+    ];
+    if (
+      launchFlags.some(
+        (value) =>
+          value === true ||
+          value === 1 ||
+          value === "1" ||
+          String(value).toLowerCase() === "true"
+      )
+    ) {
+      return true;
+    }
+    const stateText = this.getStateText(candidate);
+    if (!stateText) {
+      return false;
+    }
+    return (
+      stateText.includes("launch") ||
+      stateText.includes("starting") ||
+      stateText.includes("prelaunch") ||
+      stateText.includes("pre-launch") ||
+      stateText.includes("queued") ||
+      stateText.includes("initializing")
+    );
+  }
+
+  private collectRunningAppStates(
+    candidate: any,
+    started: Set<number>,
+    launching: Set<number>,
+    assumeRunning: boolean,
+    visited = new WeakSet<object>(),
+    depth = 0
+  ) {
+    if (candidate === null || candidate === undefined || depth > 4) {
+      return;
+    }
+
+    const candidateType = typeof candidate;
+    if (candidateType !== "object" && candidateType !== "function") {
+      const appId = this.extractAppId(candidate);
+      if (appId && this.isEligibleRunningAppId(appId) && assumeRunning) {
+        started.add(appId);
+      }
+      return;
+    }
+
+    if (visited.has(candidate as object)) {
+      return;
+    }
+    visited.add(candidate as object);
+
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate.slice(0, 250)) {
+        this.collectRunningAppStates(
+          entry,
+          started,
+          launching,
+          assumeRunning,
+          visited,
+          depth + 1
+        );
+      }
+      return;
+    }
+
+    if (candidate instanceof Set) {
+      let index = 0;
+      for (const entry of candidate.values()) {
+        if (index >= 250) {
+          break;
+        }
+        this.collectRunningAppStates(
+          entry,
+          started,
+          launching,
+          assumeRunning,
+          visited,
+          depth + 1
+        );
+        index += 1;
+      }
+      return;
+    }
+
+    if (candidate instanceof Map) {
+      let index = 0;
+      for (const [key, value] of candidate.entries()) {
+        if (index >= 250) {
+          break;
+        }
+        this.collectRunningAppStates(
+          value,
+          started,
+          launching,
+          assumeRunning,
+          visited,
+          depth + 1
+        );
+        this.collectRunningAppStates(
+          key,
+          started,
+          launching,
+          assumeRunning,
+          visited,
+          depth + 1
+        );
+        index += 1;
+      }
+      return;
+    }
+
+    const appId = this.extractAppId(candidate);
+    const startedMarker = this.hasStartedMarker(candidate);
+    const launchingMarker = this.hasLaunchingMarker(candidate);
+    if (appId && this.isEligibleRunningAppId(appId)) {
+      if (assumeRunning || startedMarker) {
+        started.add(appId);
+      } else if (launchingMarker) {
+        launching.add(appId);
+      }
+    }
+
+    const childKeys = [
+      "runningApps",
+      "running_apps",
+      "apps",
+      "sessions",
+      "games",
+      "rgRunningApps",
+      "rgApps",
+      "rgGames",
+      "map_running",
+      "m_mapRunningApps",
+      "m_runningApps",
+      "m_mapApps",
+      "m_mapGames",
+    ];
+    for (const key of childKeys) {
+      if (key in candidate) {
+        this.collectRunningAppStates(
+          candidate[key],
+          started,
+          launching,
+          assumeRunning,
+          visited,
+          depth + 1
+        );
+      }
+    }
+  }
+
+  private async detectActiveGameplay(): Promise<boolean> {
+    const started = new Set<number>();
+    const launching = new Set<number>();
+
+    const steamApps = (window as any)?.SteamClient?.Apps;
+    const appStore = (window as any)?.appStore;
+    const methodSources: Array<{ owner: any; method: string; assumeRunning: boolean }> = [
+      { owner: steamApps, method: "GetRunningApps", assumeRunning: true },
+      { owner: steamApps, method: "GetRunningAppList", assumeRunning: true },
+      { owner: steamApps, method: "GetAppsRunning", assumeRunning: true },
+      { owner: steamApps, method: "GetCurrentlyRunningApp", assumeRunning: true },
+      { owner: appStore, method: "GetRunningApps", assumeRunning: true },
+      { owner: appStore, method: "GetCurrentlyRunningApp", assumeRunning: true },
+    ];
+
+    for (const source of methodSources) {
+      const fn = source.owner?.[source.method];
+      if (typeof fn !== "function") {
+        continue;
+      }
+      try {
+        const result = await Promise.resolve(fn.call(source.owner));
+        this.collectRunningAppStates(
+          result,
+          started,
+          launching,
+          source.assumeRunning
+        );
+      } catch {
+        // ignore
+      }
+    }
+
+    const directIdMethods: Array<{ owner: any; method: string }> = [
+      { owner: steamApps, method: "GetCurrentGameID" },
+      { owner: steamApps, method: "GetRunningGameID" },
+      { owner: appStore, method: "GetCurrentGameID" },
+      { owner: appStore, method: "GetRunningGameID" },
+    ];
+    for (const source of directIdMethods) {
+      const fn = source.owner?.[source.method];
+      if (typeof fn !== "function") {
+        continue;
+      }
+      try {
+        const appId = this.extractAppId(await Promise.resolve(fn.call(source.owner)));
+        if (appId && this.isEligibleRunningAppId(appId)) {
+          started.add(appId);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    [
+      steamApps?.m_mapRunningApps,
+      steamApps?.m_runningApps,
+      steamApps?.runningApps,
+      appStore?.m_mapRunningApps,
+      appStore?.m_runningApps,
+      appStore?.runningApps,
+      (Router as any)?.WindowStore?.m_mapRunningApps,
+      (Router as any)?.WindowStore?.m_runningApps,
+      (Router as any)?.WindowStore?.runningApps,
+      (Router as any)?.MainRunningApp,
+      (Router as any)?.RunningApp,
+    ].forEach((value) =>
+      this.collectRunningAppStates(value, started, launching, true)
+    );
+
+    return started.size > 0 || launching.size > 0;
   }
 
   private async isStoreContextActive(): Promise<boolean> {

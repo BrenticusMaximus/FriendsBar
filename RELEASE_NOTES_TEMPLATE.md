@@ -6,6 +6,12 @@ Shows your online Steam friends in the Steam Deck top bar, to the left of the se
 
 ![FriendsBar screenshot](https://images.steamusercontent.com/ugc/10384956069292451659/921BA2D8E43BC6873932148728E338DA0FAC5EDA/?imw=5000&imh=5000&ima=fit&impolicy=Letterbox&imcolor=%23000000&letterbox=false)
 
+## v1.0.4 Update
+
+- Fix: FriendsBar now stays hidden whenever a game session is active, including during Steam toast notifications.
+- Shows up to 10 friend icons before `+N` overflow.
+- Added `Force update now`, `Reset X offset`, and `Reset Y offset` controls in plugin settings.
+
 ## Installation
 
 1. Download the latest ZIP release.

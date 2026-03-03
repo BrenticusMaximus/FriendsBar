@@ -16,6 +16,12 @@ FriendsBar is a Decky Loader plugin that shows your online Steam friends in the 
 - Refreshes automatically every 60 seconds.
 - Uses Steam Web API for more reliable status details.
 
+## Latest Update (v1.0.4)
+
+- Fix: FriendsBar now stays hidden whenever a game session is active, including during Steam toast notifications.
+- Shows up to 10 friend icons before `+N` overflow.
+- Added `Force update now`, `Reset X offset`, and `Reset Y offset` controls in plugin settings.
+
 ## Setup
 
 1. Open FriendsBar in Decky.
